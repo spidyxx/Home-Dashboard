@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { TZ } from "@/lib/db";
 import {
-  RANGES,
   carSolarShare,
   getDay,
   getHistory,
@@ -9,8 +8,8 @@ import {
   selfSufficiency,
   type DayData,
   type HistoryRow,
-  type Range,
 } from "@/lib/energy";
+import { RANGES, parseRange, type Range } from "@/lib/series";
 import {
   addDays,
   formatClock,
@@ -27,7 +26,7 @@ import { AutoRefresh } from "@/components/auto-refresh";
 import { LiveTiles } from "@/components/energy/live-tiles";
 import { PowerChart } from "@/components/energy/power-chart";
 import { HistoryChart, type HistoryPoint } from "@/components/energy/history-chart";
-import { ChartOrTable } from "@/components/energy/chart-parts";
+import { ChartOrTable } from "@/components/charts/parts";
 
 export const dynamic = "force-dynamic";
 
@@ -39,7 +38,7 @@ export default async function EnergyPage({ searchParams }: {
   const params = await searchParams;
   const today = todayIn(TZ);
   const day = isDay(params.day) && params.day <= today ? params.day : today;
-  const range: Range = params.range && params.range in RANGES ? (params.range as Range) : "30d";
+  const range = parseRange(params.range);
 
   const [live, dayData, history] = await Promise.all([getLive(), getDay(day), getHistory(range, today)]);
 

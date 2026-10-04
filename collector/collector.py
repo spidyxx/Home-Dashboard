@@ -20,15 +20,17 @@ import requests
 
 import notifications
 from db import Database
-from sources.base import SourceError
+from sources.base import Event, SourceError
 from sources.envoy import EnvoySource
 from sources.easee import EaseeSource
+from sources.fritz import FritzSource
 
 # config.ini section -> source class. A source runs if its section exists and
 # does not say Enabled = false.
 SOURCE_TYPES = {
     'ENVOY': EnvoySource,
     'EASEE': EaseeSource,
+    'FRITZ': FritzSource,
 }
 
 ROLLUP_INTERVAL = 60
@@ -101,14 +103,20 @@ class Health:
                                  f"No data for {down_for / 60:.0f} min.\nLast error: {error}")
 
 
-def run_source(source, db, health, stop):
+def run_source(source, db, health, notifier, stop):
     """Polls one source until stopped. A failed poll is retried at the next interval."""
     while not stop.is_set():
         started = time.time()
         try:
-            readings = source.poll()
+            items = source.poll()
             health.ok(source.name)
-            if db.write(readings):
+            for event in items:
+                if isinstance(event, Event):
+                    logger.info("Event %s/%s: %s", event.source, event.kind, event.message)
+                    if event.notify:
+                        notifier.notify(f"event_{event.source}_{event.kind}_{event.data.get('key', '')}",
+                                        f"🏠 {event.message}")
+            if db.write(items):
                 health.ok('database')
             else:
                 health.failed('database', db.last_error)
@@ -159,8 +167,11 @@ def probe(sources):
         try:
             source.probe()
             print("\nParsed readings:")
-            for r in source.poll():
-                print(f"  {r.key:28} {r.value:>14,.1f}")
+            for item in source.poll():
+                if isinstance(item, Event):
+                    print(f"  event {item.kind}: {item.message}")
+                elif hasattr(item, 'value'):
+                    print(f"  {item.key:28} {item.value:>14,.1f}")
         except Exception as e:
             ok = False
             print(f"FAILED: {e!r}")
@@ -205,7 +216,8 @@ def main():
     signal.signal(signal.SIGINT, handle_signal)
 
     logger.warning("Collector starting with sources: %s", ", ".join(s.name for s in sources))
-    threads = [threading.Thread(target=run_source, args=(s, db, health, stop), name=s.name, daemon=True)
+    threads = [threading.Thread(target=run_source, args=(s, db, health, notifier, stop), name=s.name,
+                                daemon=True)
                for s in sources]
     for t in threads:
         t.start()

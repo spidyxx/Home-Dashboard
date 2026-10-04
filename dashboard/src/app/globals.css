@@ -1,8 +1,9 @@
 @import "tailwindcss";
 
-/* Design tokens. Chart series follow the entity everywhere on the dashboard:
-   solar = orange, home = blue, car = aqua (validated for colour-vision
-   deficiencies in both modes). Dark mode uses its own validated steps. */
+/* Design tokens. Series colours are categorical slots in fixed order, validated
+   for colour-vision deficiencies in both modes (dark mode has its own steps).
+   Each page maps its entities onto the slots and keeps them consistent:
+   energy: solar = 2, home = 1, car = 3; network: download = 1, upload = 2. */
 :root {
   color-scheme: light;
   --page: #f9f9f7;
@@ -13,9 +14,15 @@
   --grid: #e1e0d9;
   --axis: #c3c2b7;
   --hairline: rgba(11, 11, 11, 0.1);
-  --solar: #eb6834;
-  --home: #2a78d6;
-  --car: #1baf7a;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --solar: var(--series-2);
+  --home: var(--series-1);
+  --car: var(--series-3);
+  --download: var(--series-1);
+  --upload: var(--series-2);
+  --good: #0ca30c;
   --good-text: #006300;
   --warning: #fab219;
   --critical: #d03b3b;
@@ -31,9 +38,9 @@
     --grid: #2c2c2a;
     --axis: #383835;
     --hairline: rgba(255, 255, 255, 0.1);
-    --solar: #d95926;
-    --home: #3987e5;
-    --car: #199e70;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
     --good-text: #0ca30c;
   }
 }
@@ -50,6 +57,7 @@
   --color-solar: var(--solar);
   --color-home: var(--home);
   --color-car: var(--car);
+  --color-good: var(--good);
   --color-good-text: var(--good-text);
   --color-warning: var(--warning);
   --color-critical: var(--critical);

@@ -2,7 +2,7 @@
 # Local development stack with simulated devices. Never touches the real Envoy,
 # the Easee account, or the production database.
 #
-#   scripts/dev-stack.sh up      # Postgres (podman) + 30 days of history + fake devices + collector
+#   scripts/dev-stack.sh up      # Postgres (podman) + 30 days of history + fake Envoy/Easee/FRITZ!Box + collector
 #   scripts/dev-stack.sh down    # stop everything and delete the dev database
 #   scripts/dev-stack.sh logs    # follow the collector log
 #
@@ -83,16 +83,23 @@ Token = dev.eyJleHAiOjQxMDI0NDQ4MDB9.dev
 ApiUrl = http://127.0.0.1:8099
 Username = dev
 Password = dev
+[FRITZ]
+; Simulated by dev/fake_fritz.py (see dev/run_collector.py)
+Username = dev
+Password = dev
+Presence = Alex=DE:AD:BE:EF:00:01, Sam=DE:AD:BE:EF:00:02
+NotifyNewDevices = false
 EOF
     start_bg fake-devices "$PY" dev/fake_devices.py
     sleep 1
-    start_bg collector "$PY" collector.py --config "$RUN/collector.ini"
+    start_bg collector "$PY" dev/run_collector.py --config "$RUN/collector.ini"
     echo "Dev database: postgresql://home_ro:home_ro@127.0.0.1:$DB_PORT/home"
     ;;
   down)
     stop_bg collector
     stop_bg fake-devices
     podman rm -f "$PG" >/dev/null 2>&1 && echo "removed $PG" || true
+    rm -rf "$RUN/sim-data"   # state that belongs to the deleted dev database
     ;;
   logs)
     tail -f "$RUN/collector.out"

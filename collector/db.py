@@ -10,6 +10,9 @@ import collections
 from datetime import datetime, timezone
 
 import psycopg
+from psycopg.types.json import Jsonb
+
+from sources.base import Entity, Event, Reading
 
 logger = logging.getLogger(__name__)
 
@@ -117,18 +120,19 @@ class Database:
 
     # --- writes --------------------------------------------------------------
 
-    def write(self, readings):
+    def write(self, items):
         """
-        Queues readings and flushes everything pending. Never raises.
+        Queues Readings, Entities and Events and flushes everything pending.
+        Never raises.
 
-        Returns True if the queue was flushed, False if the readings stay
+        Returns True if the queue was flushed, False if the items stay
         buffered for the next attempt.
         """
         with self.lock:
-            for reading in readings:
+            for item in items:
                 if len(self.pending) == self.pending.maxlen:
                     self.dropped += 1
-                self.pending.append(reading)
+                self.pending.append(item)
             if self.dropped:
                 logger.error("Reading buffer full - dropped %d oldest readings so far.", self.dropped)
             return self._flush()
@@ -137,13 +141,32 @@ class Database:
         if not self.pending:
             return True
         batch = list(self.pending)
+        readings = [r for r in batch if isinstance(r, Reading)]
         try:
             conn = self._ensure()
-            rows = [(self.sensor_ids[r.key], r.ts, r.value) for r in batch]
             with conn.transaction(), conn.cursor() as cur:
-                cur.executemany(
-                    "INSERT INTO reading (sensor_id, ts, value) VALUES (%s, %s, %s) "
-                    "ON CONFLICT DO NOTHING", rows)
+                if readings:
+                    cur.executemany(
+                        "INSERT INTO reading (sensor_id, ts, value) VALUES (%s, %s, %s) "
+                        "ON CONFLICT DO NOTHING",
+                        [(self.sensor_ids[r.key], r.ts, r.value) for r in readings])
+                entities = [e for e in batch if isinstance(e, Entity)]
+                if entities:
+                    # GREATEST ignores NULL: an inactive report keeps last_seen.
+                    cur.executemany(
+                        """INSERT INTO entity (kind, key, attributes, first_seen, last_seen, updated_at)
+                           VALUES (%s, %s, %s, %s, %s, %s)
+                           ON CONFLICT (kind, key) DO UPDATE
+                           SET attributes = EXCLUDED.attributes,
+                               last_seen = GREATEST(entity.last_seen, EXCLUDED.last_seen),
+                               updated_at = GREATEST(entity.updated_at, EXCLUDED.updated_at)""",
+                        [(e.kind, e.key, Jsonb(e.attributes), e.ts, e.ts if e.active else None, e.ts)
+                         for e in entities])
+                events = [e for e in batch if isinstance(e, Event)]
+                if events:
+                    cur.executemany(
+                        "INSERT INTO event (ts, source, kind, message, data) VALUES (%s, %s, %s, %s, %s)",
+                        [(e.ts, e.source, e.kind, e.message, Jsonb(e.data)) for e in events])
         except Exception as e:
             # Logged (throttled) and alerted on by the caller via Health.
             self._reset()
@@ -152,9 +175,10 @@ class Database:
             return False
         self.pending.clear()
         self.dropped = 0
-        earliest = min(r.ts for r in batch)
-        if self.dirty_since is None or earliest < self.dirty_since:
-            self.dirty_since = earliest
+        if readings:
+            earliest = min(r.ts for r in readings)
+            if self.dirty_since is None or earliest < self.dirty_since:
+                self.dirty_since = earliest
         return True
 
     def is_backlogged(self):

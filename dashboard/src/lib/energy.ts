@@ -1,10 +1,10 @@
-// Energy queries. Raw samples (`reading`) feed the live view; everything else
-// reads the per-minute rollup (`reading_1m`). Energy totals come from the
-// lifetime counters (day-end minus previous day-end), so they stay correct
-// across collector downtime; power curves come from the gauges.
+// Energy queries. Energy totals come from the lifetime counters (day-end minus
+// previous day-end), so they stay correct across collector downtime; power
+// curves come from the gauges.
 
 import { pool, TZ } from "./db";
 import { addDays, todayIn } from "./format";
+import { counterDeltas, dayBounds, latest, minuteSeries, rangeStart, toPeriods, type Range } from "./series";
 
 export const SENSORS = {
   pvPower: "envoy.pv_power",
@@ -32,11 +32,7 @@ export type Live = {
 };
 
 export async function getLive(): Promise<Live> {
-  const { rows } = await pool.query<{ key: string; ts: Date; value: number }>(
-    "SELECT key, ts, value FROM sensor_latest WHERE key = ANY($1)",
-    [[SENSORS.pvPower, SENSORS.gridPower, SENSORS.carPower, SENSORS.carMode, SENSORS.carSession]],
-  );
-  const by = new Map(rows.map((r) => [r.key, r]));
+  const by = await latest([SENSORS.pvPower, SENSORS.gridPower, SENSORS.carPower, SENSORS.carMode, SENSORS.carSession]);
   const v = (key: string) => by.get(key)?.value ?? null;
   const pvW = v(SENSORS.pvPower);
   const gridW = v(SENSORS.gridPower);
@@ -97,31 +93,6 @@ export function sumTotals(list: EnergyTotals[]): EnergyTotals {
   return out;
 }
 
-// Per local day and counter: last value of the day minus the last value before
-// the day (or the day's first value when there is nothing earlier). A gap in
-// the data lands on the day after the gap instead of being lost.
-const COUNTER_DELTAS_SQL = `
-WITH days AS (
-  SELECT d::date AS day,
-         d::date::timestamp AT TIME ZONE $3 AS day_start,
-         (d::date + 1)::timestamp AT TIME ZONE $3 AS day_end
-  FROM generate_series($1::date, $2::date, interval '1 day') d
-)
-SELECT days.day::text AS day, s.key,
-       GREATEST(e.last - COALESCE(b.last, f.min), 0)::float8 AS delta
-FROM days
-CROSS JOIN sensor s
-LEFT JOIN LATERAL (SELECT last FROM reading_1m WHERE sensor_id = s.id
-                   AND bucket >= days.day_start AND bucket < days.day_end
-                   ORDER BY bucket DESC LIMIT 1) e ON true
-LEFT JOIN LATERAL (SELECT last FROM reading_1m WHERE sensor_id = s.id
-                   AND bucket < days.day_start
-                   ORDER BY bucket DESC LIMIT 1) b ON true
-LEFT JOIN LATERAL (SELECT min FROM reading_1m WHERE sensor_id = s.id
-                   AND bucket >= days.day_start
-                   ORDER BY bucket LIMIT 1) f ON true
-WHERE s.key = ANY($4) AND e.last IS NOT NULL`;
-
 // Solar share of car charging, power-weighted per minute: in each minute the
 // car is attributed the same solar fraction as the whole house
 // (1 - grid import / consumption). The sensor ids are scalar subqueries so the
@@ -166,17 +137,12 @@ export async function dailyTotals(from: string, to: string): Promise<Map<string,
 
 async function queryDailyTotals(from: string, to: string): Promise<Map<string, EnergyTotals>> {
   const counterKeys = [SENSORS.pvEnergy, SENSORS.importEnergy, SENSORS.exportEnergy, SENSORS.carEnergy];
-  const [counters, carSolar] = await Promise.all([
-    pool.query<{ day: string; key: string; delta: number }>(COUNTER_DELTAS_SQL, [from, to, TZ, counterKeys]),
+  const [deltas, carSolar] = await Promise.all([
+    counterDeltas(from, to, counterKeys),
     pool.query<{ day: string; car: number; car_solar: number }>(CAR_SOLAR_SQL, [
       from, to, TZ, SENSORS.carPower, SENSORS.pvPower, SENSORS.gridPower,
     ]),
   ]);
-
-  const deltas = new Map<string, Record<string, number>>();
-  for (const r of counters.rows) {
-    deltas.set(r.day, { ...deltas.get(r.day), [r.key]: r.delta });
-  }
   const solarRatio = new Map(carSolar.rows.map((r) => [r.day, r.car > 0 ? r.car_solar / r.car : null]));
 
   const out = new Map<string, EnergyTotals>();
@@ -202,42 +168,24 @@ export type DayData = {
   totals: EnergyTotals | null;
 };
 
-const DAY_POWER_SQL = `
-SELECT (extract(epoch FROM r.bucket) * 1000)::float8 AS t,
-       max(r.avg) FILTER (WHERE s.key = $3) AS pv,
-       max(r.avg) FILTER (WHERE s.key = $4) AS grid,
-       max(r.avg) FILTER (WHERE s.key = $5) AS car
-FROM reading_1m r JOIN sensor s ON s.id = r.sensor_id
-WHERE s.key IN ($3, $4, $5) AND r.bucket >= $1 AND r.bucket < $2
-GROUP BY r.bucket ORDER BY r.bucket`;
-
 // The car is polled every 30-120 s, so some minutes have no sample of their own.
 const CAR_FILL_MS = 3 * 60_000;
 
 export async function getDay(day: string): Promise<DayData> {
-  const bounds = await pool.query<{ start: Date; end: Date }>(
-    `SELECT $1::date::timestamp AT TIME ZONE $2 AS start, ($1::date + 1)::timestamp AT TIME ZONE $2 AS "end"`,
-    [day, TZ],
-  );
-  const { start, end } = bounds.rows[0];
-
+  const { start, end } = await dayBounds(day);
   const [power, totals] = await Promise.all([
-    pool.query<{ t: number; pv: number | null; grid: number | null; car: number | null }>(DAY_POWER_SQL, [
-      start, end, SENSORS.pvPower, SENSORS.gridPower, SENSORS.carPower,
-    ]),
+    minuteSeries(start, end, [SENSORS.pvPower, SENSORS.gridPower, SENSORS.carPower]),
     dailyTotals(day, day),
   ]);
 
   let lastCar: { t: number; w: number } | null = null;
-  const points = power.rows.map((r): PowerPoint => {
-    if (r.car != null) lastCar = { t: r.t, w: r.car };
-    const car = r.car ?? (lastCar && r.t - lastCar.t <= CAR_FILL_MS ? lastCar.w : null);
-    return {
-      t: r.t,
-      solar: r.pv == null ? null : Math.max(r.pv, 0),
-      home: homePower(r.pv, r.grid, car),
-      car,
-    };
+  const points = power.map(({ t, values }): PowerPoint => {
+    const pv = values[SENSORS.pvPower];
+    const grid = values[SENSORS.gridPower];
+    const measured = values[SENSORS.carPower];
+    if (measured != null) lastCar = { t, w: measured };
+    const car = measured ?? (lastCar && t - lastCar.t <= CAR_FILL_MS ? lastCar.w : null);
+    return { t, solar: pv == null ? null : Math.max(pv, 0), home: homePower(pv, grid, car), car };
   });
 
   return { day, start: start.getTime(), end: end.getTime(), points, totals: totals.get(day) ?? null };
@@ -245,40 +193,10 @@ export async function getDay(day: string): Promise<DayData> {
 
 // --- history -----------------------------------------------------------------
 
-export const RANGES = {
-  "30d": { label: "30 days", days: 30, monthly: false },
-  "90d": { label: "90 days", days: 90, monthly: false },
-  "12m": { label: "12 months", days: 0, monthly: true },
-} as const;
-export type Range = keyof typeof RANGES;
-
 export type HistoryRow = { period: string; totals: EnergyTotals | null };
 
 /** Daily rows (or monthly for 12m) ending today; periods without data have totals = null. */
 export async function getHistory(range: Range, today: string): Promise<HistoryRow[]> {
-  const spec = RANGES[range];
-  if (!spec.monthly) {
-    const from = addDays(today, -(spec.days - 1));
-    const totals = await dailyTotals(from, today);
-    return Array.from({ length: spec.days }, (_, i) => {
-      const day = addDays(from, i);
-      return { period: day, totals: totals.get(day) ?? null };
-    });
-  }
-
-  const [y, m] = today.split("-").map(Number);
-  const months = Array.from({ length: 12 }, (_, i) => {
-    const d = new Date(Date.UTC(y, m - 12 + i, 1));
-    return d.toISOString().slice(0, 7);
-  });
-  const totals = await dailyTotals(`${months[0]}-01`, today);
-  const byMonth = new Map<string, EnergyTotals[]>();
-  for (const [day, t] of totals) {
-    const month = day.slice(0, 7);
-    byMonth.set(month, [...(byMonth.get(month) ?? []), t]);
-  }
-  return months.map((month) => {
-    const list = byMonth.get(month);
-    return { period: month, totals: list ? sumTotals(list) : null };
-  });
+  const totals = await dailyTotals(rangeStart(range, today), today);
+  return toPeriods(range, today, totals, sumTotals).map(({ period, value }) => ({ period, totals: value }));
 }

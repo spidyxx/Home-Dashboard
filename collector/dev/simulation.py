@@ -119,3 +119,50 @@ class Simulation:
             'easee.session_energy': self.session_energy,
             'easee.lifetime_energy': self.car_energy,
         }
+
+
+# --- network (FRITZ!Box) -------------------------------------------------------
+
+PEOPLE = ('Alex', 'Sam')
+DEVICES = [  # name, interface, owner (for presence), MAC suffix
+    ('alex-iphone', 'wifi', 'Alex', '01'), ('sam-pixel', 'wifi', 'Sam', '02'),
+    ('macbook-pro', 'wifi', None, '03'), ('LG-webOS-TV', 'lan', None, '04'),
+    ('unraid', 'lan', None, '05'), ('envoy', 'lan', None, '06'),
+    ('Easee-EHFAKE01', 'wifi', None, '07'), ('bazzite', 'lan', None, '08'),
+    ('sonos-kitchen', 'wifi', None, '09'), ('HP-LaserJet', 'wifi', None, '0A'),
+    ('ipad', 'wifi', None, '0B'), ('nintendo-switch', 'wifi', None, '0C'),
+    ('guest-phone', 'wifi', None, '0D'),
+]
+
+
+def device_mac(suffix):
+    return f'DE:AD:BE:EF:00:{suffix}'
+
+
+def is_home(person, local):
+    """Alex works away on weekdays; Sam is out some mornings."""
+    hour, weekday, day = local.hour + local.minute / 60, local.weekday(), local.toordinal()
+    if person == 'Alex':
+        return not (weekday < 5 and 7.75 <= hour < 17.5)
+    return not (_rng(day, 7).random() < 0.5 and 9 <= hour < 12.5)
+
+
+def network_minute(local):
+    """Download/upload rate (bit/s), online flag, devices online at this local minute."""
+    hour, day = local.hour + local.minute / 60, local.toordinal()
+    # One outage five days ago, 03:12-03:24.
+    online = not (day == datetime.now(TZ).toordinal() - 5 and 3.2 <= hour < 3.4)
+    r = _rng(day, local.hour, local.minute // 10, 5)
+    down = 0.3e6 + r.uniform(0, 0.4e6)
+    if 19 <= hour < 23:
+        down += r.uniform(12e6, 28e6)                     # evening streaming
+    elif 8 <= hour < 18 and local.weekday() < 5 and r.random() < 0.4:
+        down += r.uniform(2e6, 6e6)                       # video calls
+    if _rng(day, 6).random() < 0.25 and 21 <= hour < 21.25:
+        down += 280e6                                     # a big game update
+    up = down * 0.08 + r.uniform(0.05e6, 0.3e6)
+    home = sum(is_home(p, local) for p in PEOPLE)
+    devices = 7 + 2 * home + (3 if 18 <= hour < 23 else 0)
+    if not online:
+        down = up = 0.0
+    return down, up, online, devices

@@ -13,6 +13,12 @@ from datetime import datetime, timezone
 # kind: 'gauge' (instantaneous), 'counter' (ever-growing total), 'state' (enum).
 Sensor = namedtuple('Sensor', 'key name unit kind')
 Reading = namedtuple('Reading', 'key ts value')
+# Something a source knows about, e.g. a network device keyed by its MAC.
+# `active` = present right now (moves last_seen forward).
+Entity = namedtuple('Entity', 'kind key attributes active ts')
+# Something that happened. notify=True also sends it as a Signal message;
+# data['key'] (if any) keeps repeats of the same event apart for rate limiting.
+Event = namedtuple('Event', 'ts source kind message data notify')
 
 
 class SourceError(Exception):
@@ -57,6 +63,9 @@ class Source:
 
     def reading(self, key, value, ts=None):
         return Reading(key, ts or self.now(), float(value))
+
+    def event(self, kind, message, data=None, notify=False, ts=None):
+        return Event(ts or self.now(), self.name, kind, message, data or {}, notify)
 
     # --- token cache helpers (tokens live in the data dir, never in git) ------
 

@@ -1,14 +1,16 @@
 # Home-Dashboard
 
 One place for everything the house measures, stored in **our own Postgres**
-instead of a dozen vendor apps and clouds. It starts with energy: solar
-production, grid import/export, house consumption, and car charging.
+instead of a dozen vendor apps and clouds:
+
+- **Energy:** solar production, grid import/export, house consumption, car charging.
+- **Network:** internet traffic and outages, devices on the network, who's home.
 
 ```
  Enphase Envoy (LAN) ─┐                         ┌──────────────┐
  Easee cloud (read) ──┼─> home-collector ──────>│  Postgres 16 │──> home-dashboard
- … next sources …   ──┘   (Python, polls)       │  db `home`   │    (Next.js, :4010)
-                                                └──────────────┘
+ FRITZ!Box (TR-064) ──┤   (Python, polls)       │  db `home`   │    (Next.js, :4010)
+ … next sources …   ──┘                         └──────────────┘
 ```
 
 - **collector/**: Python service. Polls each source on its own interval and
@@ -33,6 +35,8 @@ to `reading`. A new device never needs a schema change.
 | `reading` | raw samples `(sensor_id, ts, value)`, every 10–120 s |
 | `reading_1m` | per-minute avg/min/max/last, maintained by the collector, kept forever |
 | `sensor_latest` | view: newest raw value per sensor |
+| `entity` | things a source knows about, e.g. network devices by MAC: latest attributes, first/last seen |
+| `event` | things that happened: outages, reconnects, IP changes, new devices, ... |
 
 Conventions:
 - Power is stored in **W** and energy in **Wh**.
@@ -46,6 +50,10 @@ Conventions:
 | `envoy.pv_power`, `envoy.grid_power` | Envoy CT meters, `/ivp/meters/readings` |
 | `envoy.pv_energy`, `envoy.grid_import_energy`, `envoy.grid_export_energy` | same, lifetime counters |
 | `easee.power`, `easee.op_mode`, `easee.session_energy`, `easee.lifetime_energy` | Easee observations 120, 109, 121, 124 |
+| `fritz.download_rate`, `fritz.upload_rate` (bit/s) | FRITZ!Box byte counters, averaged between polls |
+| `fritz.bytes_received`, `fritz.bytes_sent` (B) | same counters, kept growing across FRITZ!Box restarts |
+| `fritz.online`, `fritz.devices_online`, `fritz.devices_wifi` | connection status, device list |
+| `fritz.home.<name>` | 1 while one of that person's phones was on the network within `AwayAfterMinutes` |
 
 Derived on the dashboard:
 - **Consumption** = solar + import − export.
@@ -99,6 +107,25 @@ Derived on the dashboard:
    - Dashboard: http://192.168.178.70:4010
    - Logs: `ssh root@192.168.178.70 docker logs -f home-collector`
 
+## Network (FRITZ!Box)
+
+Needs TR-064 (Heimnetz → Netzwerk → Netzwerkeinstellungen → "Zugriff für
+Anwendungen zulassen") and a FRITZ!Box user with only the "FRITZ!Box
+Einstellungen" right. Set it up in `[FRITZ]` (see `config.example.ini`); the
+`--probe` output lists the devices online, so you can pick the phones' MACs for
+`Presence = Name=MAC, ...`. Phones using a *rotating* private Wi-Fi address
+cannot be tracked; a fixed per-network private address (the default) is fine.
+
+With a FRITZ! mesh, the device list also shows which box each device is
+connected to ("Via"), with Wi-Fi band and current link rate, from the mesh map;
+mesh repeaters are labelled and not counted as devices. Who's home works across
+the mesh - the main box knows every device, whichever box it is connected to.
+
+Signal messages: a device the network has never seen comes online, and the
+internet coming back after an outage (during it, Signal cannot be reached).
+Reconnects, IP changes, FRITZ!Box restarts and firmware updates are logged as
+events on the Network page.
+
 ## Collector behaviour
 
 - **Database outages** (container updates, the nightly appdata backup): readings
@@ -121,7 +148,7 @@ Derived on the dashboard:
 
 ```bash
 scripts/dev-stack.sh up        # Postgres (podman), 30 days of simulated history,
-                               # fake Envoy + Easee, and the real collector against them
+                               # fake Envoy, Easee and FRITZ!Box, and the real collector against them
 echo "DATABASE_URL=postgresql://home_ro:home_ro@127.0.0.1:55432/home" > dashboard/.env
 dashboard/scripts/dev.sh install
 dashboard/scripts/dev.sh dev   # http://localhost:3000
