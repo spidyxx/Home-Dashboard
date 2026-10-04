@@ -62,7 +62,7 @@ def band(interface_name):
 
 def parse_mesh(mesh):
     """
-    The FRITZ! mesh map -> ({client MAC: link}, {mesh node MAC: role}).
+    The FRITZ! mesh map -> ({client MAC: link}, {mesh box MAC: {'name', 'role'}}).
 
     A link says which mesh box the client hangs on ('via'), the Wi-Fi band and
     the current link rate. A client can show several connected links (e.g.
@@ -71,11 +71,11 @@ def parse_mesh(mesh):
     nodes = {n['uid']: n for n in mesh.get('nodes', [])}
     meshed = {uid for uid, n in nodes.items() if n.get('is_meshed')}
     interface_names = {i['uid']: i.get('name', '') for n in nodes.values() for i in n.get('node_interfaces', [])}
-    links, roles = {}, {}
+    links, boxes = {}, {}
     for uid, node in nodes.items():
         mac = (node.get('device_mac_address') or '').upper()
         if uid in meshed:
-            roles[mac] = node.get('mesh_role', '')
+            boxes[mac] = {'name': node.get('device_name', ''), 'role': node.get('mesh_role', '')}
             continue
         for interface in node.get('node_interfaces', []):
             for link in interface.get('node_links', []):
@@ -91,7 +91,43 @@ def parse_mesh(mesh):
                     links[mac] = {'via': nodes[peer].get('device_name', ''),
                                   'band': band(interface_names.get(peer_interface, '')),
                                   'link_mbit': round(rate)}
-    return links, roles
+    return links, boxes
+
+
+def correct_wired_links(hosts, links, boxes):
+    """
+    The mesh map can place a wired device behind a repeater that it is not
+    behind (2026-10-04: a device on the main box's LAN 2 was attributed to the
+    repeater's uplink port). The host list's X_AVM-DE_Port - the main box's
+    port where a device's traffic arrives - settles it: everything behind a
+    repeater arrives on the same port as the repeater itself.
+    """
+    master = next((b['name'] for b in boxes.values() if b['role'] == 'master'), None)
+    repeater_ports = {}
+    for host in hosts:
+        box = boxes.get((host.get('MACAddress') or '').upper())
+        if box and box['role'] == 'slave':
+            repeater_ports[box['name']] = host.get('X_AVM-DE_Port')
+    for host in hosts:
+        mac = (host.get('MACAddress') or '').upper()
+        link = links.get(mac)
+        if not (master and link and host.get('InterfaceType') == 'Ethernet'):
+            continue
+        port, repeater_port = host.get('X_AVM-DE_Port'), repeater_ports.get(link['via'])
+        if port and repeater_port and port != repeater_port:
+            links[mac] = {**link, 'via': master}
+    return links
+
+
+def read_mesh(fritz_hosts, hosts):
+    """Mesh links (corrected) and mesh boxes; empty if the box has no mesh map to offer."""
+    try:
+        links, boxes = parse_mesh(fritz_hosts.get_mesh_topology())
+    except Exception as e:
+        # The mesh map only adds detail - without it the device list still works.
+        logger.debug("FRITZ!Box mesh map unavailable: %s", e)
+        return {}, {}
+    return correct_wired_links(hosts, links, boxes), boxes
 
 
 def duration(seconds):
@@ -223,12 +259,7 @@ class FritzSource(Source):
         items = []
         fritz_hosts = FritzHosts(fc=self.fc)
         hosts = fritz_hosts.get_hosts_attributes()
-        try:
-            links, mesh_roles = parse_mesh(fritz_hosts.get_mesh_topology())
-        except Exception as e:
-            # The mesh map only adds detail - without it the device list still works.
-            logger.debug("FRITZ!Box mesh map unavailable: %s", e)
-            links, mesh_roles = {}, {}
+        links, boxes = read_mesh(fritz_hosts, hosts)
 
         first_run = 'known_macs' not in self.state
         known = set(self.state.get('known_macs', []))
@@ -249,7 +280,7 @@ class FritzSource(Source):
                 'via': link.get('via', ''),
                 'band': link.get('band', ''),
                 'guest': bool(host.get('X_AVM-DE_Guest')),
-                'mesh_role': mesh_roles.get(mac, ''),
+                'mesh_role': boxes.get(mac, {}).get('role', ''),
                 'active': active,
             }
             items.append(Entity('network_device', mac, attributes, active, ts))
@@ -332,19 +363,18 @@ class FritzSource(Source):
         print(f"Link: {link['NewWANAccessType']}, {int(link['NewLayer1DownstreamMaxBitRate']) / 1e6:.0f} / "
               f"{int(link['NewLayer1UpstreamMaxBitRate']) / 1e6:.0f} Mbit/s")
         fritz_hosts = FritzHosts(fc=self.fc)
-        hosts = [h for h in fritz_hosts.get_hosts_attributes() if not is_box_itself(h, self.address)]
-        try:
-            links, mesh_roles = parse_mesh(fritz_hosts.get_mesh_topology())
-        except Exception as e:
-            print(f"Mesh map unavailable ({e}) - devices are listed without 'via'.")
-            links, mesh_roles = {}, {}
+        all_hosts = fritz_hosts.get_hosts_attributes()
+        links, boxes = read_mesh(fritz_hosts, all_hosts)
+        if not boxes:
+            print("No mesh map - devices are listed without 'via'.")
+        hosts = [h for h in all_hosts if not is_box_itself(h, self.address)]
         active = [h for h in hosts if h.get('Active')]
         print(f"Devices: {len(hosts)} known, {len(active)} online now:")
         for h in sorted(active, key=lambda h: (h.get('HostName') or '').lower()):
             mac = (h.get('MACAddress') or '').upper()
             link = links.get(mac, {})
             via = f"via {link['via']} {link['band']}".strip() if link else ''
-            role = f"mesh {mesh_roles[mac]}" if mac in mesh_roles else ''
+            role = f"mesh {boxes[mac]['role']}" if mac in boxes else ''
             print(f"  {h.get('HostName') or '?':30} {h.get('IPAddress') or '':16} "
                   f"{INTERFACES.get(h.get('InterfaceType') or '', '?'):5} {mac}  {via or role}"
                   f"{'  (guest)' if h.get('X_AVM-DE_Guest') else ''}")
