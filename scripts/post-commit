@@ -1,0 +1,35 @@
+#!/bin/bash
+# Git post-commit hook: deploy after every commit, like Wallbox-Steuerung - but
+# only the parts the commit touched, so a README fix does not restart anything.
+# Install once per clone:  ln -s ../../scripts/post-commit .git/hooks/post-commit
+#
+# Note: deploy.sh syncs the working tree, so uncommitted changes go out too.
+# Preview without deploying:  DRY_RUN=1 scripts/post-commit
+
+root="$(git rev-parse --show-toplevel)"
+changed="$(git diff-tree --no-commit-id --name-only -r --root HEAD)"
+
+# Files of a component that do not end up in its image.
+touched() {
+  grep -E "^$1/" <<<"$changed" | grep -vE "^$1/(dev/|scripts/|config\.example\.ini|\.env\.example)"
+}
+
+collector="$(touched collector)"
+dashboard="$(touched dashboard)"
+# deploy.sh defines how both containers run.
+if grep -qx 'deploy.sh' <<<"$changed"; then collector=yes; dashboard=yes; fi
+
+if [ -n "$collector" ] && [ -n "$dashboard" ]; then target=all
+elif [ -n "$collector" ]; then target=collector
+elif [ -n "$dashboard" ]; then target=dashboard
+else
+  echo "post-commit: nothing to deploy (docs/dev files only)."
+  exit 0
+fi
+
+if [ -n "$DRY_RUN" ]; then
+  echo "post-commit: would deploy '$target'."
+  exit 0
+fi
+echo "post-commit: deploying '$target'..."
+"$root/deploy.sh" "$target"

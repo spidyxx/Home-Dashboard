@@ -1,0 +1,68 @@
+@import "tailwindcss";
+
+/* Design tokens. Chart series follow the entity everywhere on the dashboard:
+   solar = orange, home = blue, car = aqua (validated for colour-vision
+   deficiencies in both modes). Dark mode uses its own validated steps. */
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --hairline: rgba(11, 11, 11, 0.1);
+  --solar: #eb6834;
+  --home: #2a78d6;
+  --car: #1baf7a;
+  --good-text: #006300;
+  --warning: #fab219;
+  --critical: #d03b3b;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --hairline: rgba(255, 255, 255, 0.1);
+    --solar: #d95926;
+    --home: #3987e5;
+    --car: #199e70;
+    --good-text: #0ca30c;
+  }
+}
+
+@theme inline {
+  --color-page: var(--page);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-muted: var(--muted);
+  --color-grid: var(--grid);
+  --color-axis: var(--axis);
+  --color-hairline: var(--hairline);
+  --color-solar: var(--solar);
+  --color-home: var(--home);
+  --color-car: var(--car);
+  --color-good-text: var(--good-text);
+  --color-warning: var(--warning);
+  --color-critical: var(--critical);
+}
+
+body {
+  background: var(--page);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+/* Recharts draws a focus outline around the whole SVG on click. */
+.recharts-wrapper svg:focus,
+.recharts-surface:focus {
+  outline: none;
+}

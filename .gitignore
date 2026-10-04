@@ -1,0 +1,17 @@
+# Local dev stack (venv, config, logs) - scripts/dev-stack.sh
+.dev/
+
+# Python
+__pycache__/
+*.pyc
+
+# Secrets and runtime state (live on the server's appdata volume)
+config.ini
+*.env
+!.env.example
+*_token.json
+heartbeat
+
+# Logs
+*.log
+*.log.*

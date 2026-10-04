@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.log
+*.log.*
+*.json
+config.ini
+dev/
